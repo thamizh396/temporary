@@ -20,3 +20,9 @@ Next_processed_id: 101
 So if the key are not present in DB on first run or if cache gets down had to fetch these ids from the db of the max transaction ID of output or error table. Then consider this as the last processed id.
 
 Then we have to
+
+
+Output table - will contain the records which got successfully validated 
+error table - will contain the records which got failed while validation
+
+Source table - will contain the records  
