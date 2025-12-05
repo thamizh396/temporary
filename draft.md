@@ -23,6 +23,7 @@ Then we have to
 
 
 Output table - will contain the records which got successfully validated.
+
 error table - will contain the records which got failed while validation
 
 Source table - will contain the records  
