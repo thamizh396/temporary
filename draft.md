@@ -22,7 +22,7 @@ So if the key are not present in DB on first run or if cache gets down had to fe
 Then we have to
 
 
-Output table - will contain the records which got successfully validated 
+Output table - will contain the records which got successfully validated.
 error table - will contain the records which got failed while validation
 
 Source table - will contain the records  
