@@ -1,94 +1,178 @@
-# FX Monthly Average Processing -- POC
 
-This document outlines lightweight, offline approaches to compute
-monthly FX averages using the TIP API. The solution should not run
-continuously like a microservice and must execute only when required
-(monthly or on-demand).
+# FX Rate Monthly Average – Design Document
 
-------------------------------------------------------------------------
+---
 
-## Approach 1: Scheduled Standalone Spring Boot Job
+## 1. Overview
 
-### Description:
+This solution will fetch daily FX rates from the TIP API and compute monthly or N-month rolling averages for eligible partners.
+The computed monthly FX rate will be stored in `m_lfs.lfs_ref_forex_monthly_avg_rate`.
 
-A lightweight Spring Boot application that runs only when triggered
-through a scheduler or cron. It fetches partner configurations, calls
-the TIP API for required dates, computes the monthly or rolling averages
-(including AMEX-specific logic), and stores the results in the target
-table. The application completes execution and stops, without staying
-active.
+The job will run monthly (or based on the final agreed approach) and will not be implemented as a continuously running microservice.
 
-### Benefits:
+---
 
--   Simple and easy to implement\
--   Runs only when needed\
--   No continuous service overhead\
--   Low infrastructure cost\
--   Easy to debug and maintain
+## 2. Proposed Solution
 
-### Drawbacks:
+A scheduled batch job will be implemented (Lambda or scheduled Spring Boot job based on final approach decision).
 
--   No built-in restart support\
--   Manual monitoring required\
--   Scaling needs manual handling
+The execution process remains the same for all approaches:
 
-------------------------------------------------------------------------
+1. Fetch eligible partners from `m_lfs.lfs_dim_partner`.
+2. Identify required currency pairs and month/year.
+3. Call TIP API only when required.
+4. Compute monthly or rolling average.
+5. Upsert result into `m_lfs.lfs_ref_forex_monthly_avg_rate`.
 
-## Approach 2: Spring Batch Based Monthly Job
+For the monthly-based approach:
 
-### Description:
+* The job runs after month-end (post 10 PM ET).
+* It processes the required month.
+* Computes average using daily rates.
+* Stores result if not already present.
 
-This approach uses Spring Batch to structure the FX computation as a
-formal batch job. The job runs monthly, processes partners in controlled
-steps, handles retries, and stores execution metadata for tracking. It
-is still offline and trigger-based but provides better operational
-control compared to a simple scheduler.
+---
 
-### Benefits:
+## 3. Flow of Implementation
 
--   Restartable job execution\
--   Strong failure handling\
--   Better suited for higher volume\
--   Clear processing structure
+> Below flow assumes scheduler has triggered the main processing class.
 
-### Drawbacks:
+---
 
--   Higher implementation complexity\
--   Requires batch metadata tables\
--   Slightly heavier for small workloads
+### Step 1 – Fetch Eligible Partners
 
-------------------------------------------------------------------------
+Query `m_lfs.lfs_dim_partner`:
 
-## Approach 3: Serverless Scheduled Execution (AWS Lambda)
+Process only partners where:
 
-### Description:
+* `partner_additional_dtls_json.fx_rate_service_type = 'Automated'`
 
-FX computation logic is implemented inside an AWS Lambda function that
-runs on a scheduled trigger. It executes monthly, performs TIP API
-calls, computes averages, and updates the database. It does not run
-continuously and consumes resources only during execution.
+For each partner extract:
 
-### Benefits:
+* `invoice_iso_currency_cd` → Base currency
+* `partner_additional_dtls_json.fx_currency_cd` → Target currency
+* `fx_avg_months_num` → Number of months for rolling average (if applicable)
 
--   No server maintenance\
--   Cost-efficient for monthly runs\
--   Automatically scalable\
--   Fully managed infrastructure
+Multiple partners may have the same base/target currency pair.
 
-### Drawbacks:
+---
 
--   AWS vendor dependency\
--   Timeout limitations exist\
--   Debugging can be harder\
--   Additional cloud setup required
+### Step 2 – Prepare Unique Currency Pairs
 
-------------------------------------------------------------------------
+From all eligible partners:
 
-## Recommendation
+1. Build a set of unique combinations:
 
-Since the requirement clearly states the solution should be lightweight
-and not continuously running, **Approach 1 (Scheduled Standalone Job)**
-fits best.
+   ```
+   (base_currency, target_currency, year, month)
+   ```
 
-It is simple, practical, cost-effective, and aligns well with the
-offline execution requirement.
+2. This ensures:
+
+   * We avoid duplicate TIP API calls.
+   * Same currency pair is processed only once per month.
+
+---
+
+### Step 3 – Check Existing Records (Duplicate Prevention)
+
+Before calling TIP API:
+
+For each unique pair:
+
+Check if record already exists in
+`m_lfs.lfs_ref_forex_monthly_avg_rate`
+based on:
+
+```
+(base_currency, quote_currency, year, month)
+```
+
+* If record exists → Skip processing.
+* If not exists → Proceed with API calls.
+
+This prevents:
+
+* Duplicate inserts
+* Constraint violations
+* Unnecessary API calls
+
+---
+
+### Step 4 – Fetch Daily FX Rates (Only If Needed)
+
+For each required month (or N months):
+
+1. Loop through each day of the month.
+2. Call TIP API.
+3. Convert real rate:
+
+```
+realRate = outputCurrencyExchangeRate / (10 ^ outputCurrencyDecimalPoint)
+```
+
+4. Store daily values in memory.
+
+Notes:
+
+* TIP handles weekends automatically.
+* If date exceeds 2-year limit → log and skip.
+* No daily storage required in DB.
+
+---
+
+### Step 5 – Calculate Monthly / Rolling Average
+
+**Monthly Average:**
+
+```
+monthlyAverage = sum(dailyRates) / numberOfDays
+```
+
+**N-Month Rolling Average:**
+
+* Combine all daily values across N months.
+* Compute overall average.
+
+---
+
+### Step 6 – Upsert into Target Table
+
+Insert into:
+
+`m_lfs.lfs_ref_forex_monthly_avg_rate`
+
+Key:
+
+```
+base_currency + quote_currency + year + month
+```
+
+Implementation:
+
+* Use UPSERT (ON CONFLICT DO UPDATE)
+  OR
+* Insert if not exists (based on prior check).
+
+Store:
+
+* monthly_avg_quote_rate
+* year
+* month
+* Audit JSON (calculation type, execution time, version, etc.)
+
+---
+
+### Key Optimization Logic
+
+* Process only `fx_rate_service_type = Automated`
+* Deduplicate currency pairs before calling API
+* Check DB before API call
+* Compute once per unique pair
+* Avoid duplicate inserts
+
+This ensures:
+
+* Reduced external API calls
+* Clean DB state
+* Efficient monthly execution
