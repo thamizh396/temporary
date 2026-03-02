@@ -1,0 +1,94 @@
+# FX Monthly Average Processing -- POC
+
+This document outlines lightweight, offline approaches to compute
+monthly FX averages using the TIP API. The solution should not run
+continuously like a microservice and must execute only when required
+(monthly or on-demand).
+
+------------------------------------------------------------------------
+
+## Approach 1: Scheduled Standalone Spring Boot Job
+
+### Description:
+
+A lightweight Spring Boot application that runs only when triggered
+through a scheduler or cron. It fetches partner configurations, calls
+the TIP API for required dates, computes the monthly or rolling averages
+(including AMEX-specific logic), and stores the results in the target
+table. The application completes execution and stops, without staying
+active.
+
+### Benefits:
+
+-   Simple and easy to implement\
+-   Runs only when needed\
+-   No continuous service overhead\
+-   Low infrastructure cost\
+-   Easy to debug and maintain
+
+### Drawbacks:
+
+-   No built-in restart support\
+-   Manual monitoring required\
+-   Scaling needs manual handling
+
+------------------------------------------------------------------------
+
+## Approach 2: Spring Batch Based Monthly Job
+
+### Description:
+
+This approach uses Spring Batch to structure the FX computation as a
+formal batch job. The job runs monthly, processes partners in controlled
+steps, handles retries, and stores execution metadata for tracking. It
+is still offline and trigger-based but provides better operational
+control compared to a simple scheduler.
+
+### Benefits:
+
+-   Restartable job execution\
+-   Strong failure handling\
+-   Better suited for higher volume\
+-   Clear processing structure
+
+### Drawbacks:
+
+-   Higher implementation complexity\
+-   Requires batch metadata tables\
+-   Slightly heavier for small workloads
+
+------------------------------------------------------------------------
+
+## Approach 3: Serverless Scheduled Execution (AWS Lambda)
+
+### Description:
+
+FX computation logic is implemented inside an AWS Lambda function that
+runs on a scheduled trigger. It executes monthly, performs TIP API
+calls, computes averages, and updates the database. It does not run
+continuously and consumes resources only during execution.
+
+### Benefits:
+
+-   No server maintenance\
+-   Cost-efficient for monthly runs\
+-   Automatically scalable\
+-   Fully managed infrastructure
+
+### Drawbacks:
+
+-   AWS vendor dependency\
+-   Timeout limitations exist\
+-   Debugging can be harder\
+-   Additional cloud setup required
+
+------------------------------------------------------------------------
+
+## Recommendation
+
+Since the requirement clearly states the solution should be lightweight
+and not continuously running, **Approach 1 (Scheduled Standalone Job)**
+fits best.
+
+It is simple, practical, cost-effective, and aligns well with the
+offline execution requirement.
