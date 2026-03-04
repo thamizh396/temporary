@@ -1,0 +1,71 @@
+3. Flow of Implementation
+
+Below flow assumes the scheduler or manual trigger has invoked the main processing logic (JAR method or Lambda handler depending on approach).
+
+
+Step 1 – Receive or Fetch Input
+Manual Mode – Input from user/system:
+
+currencyPairs is mandatory. Error thrown if missing.
+At least one of monthYear or yearRange is mandatory. Error thrown if both missing.
+If both provided → yearRange takes priority, warning logged.
+Future months → skipped with warning.
+Beyond TIP 2-year limit → skipped with warning.
+
+Automatic Mode – Fetch from lfs_dim_partner:
+
+Query m_lfs.lfs_dim_partner and filter partner_additional_dtls_json.fx_rate_service_type = 'Automated'.
+Extract invoice_iso_currency_cd as Base currency and partner_additional_dtls_json.fx_currency_cd as Quote currency.
+
+
+Step 2 – Prepare Unique Currency Pairs
+From the input (manual) or table data (automatic):
+
+Build a deduplicated set of (base_currency, quote_currency) pairs.
+For automatic mode, append current year and month.
+For manual mode, expand into all required (base_currency, quote_currency, year, month) combinations based on input.
+This ensures no duplicate TIP API calls are made for the same pair.
+
+
+Step 3 – Determine Last Processed Day (Automatic Mode Only)
+Before calling TIP, for each currency pair check the existing record in lfs_ref_forex_monthly_avg_rate:
+
+Read last_updated from audit JSON of the existing record.
+Derive the last processed day from this timestamp.
+If no record exists → start from day 1 of current month.
+If record exists → resume from the next unprocessed day.
+
+This also handles the case where a manual trigger is fired for the current month — the logic detects days already processed via audit JSON and does not duplicate them.
+
+Step 4 – Call TIP API
+For each unique (base_currency, quote_currency, year, month):
+
+Automatic mode → call TIP for today's date only (one call per pair).
+Manual mode → loop through every day of the month, call TIP per day.
+Convert rate: realRate = outputCurrencyExchangeRate / (10 ^ outputCurrencyDecimalPoint)
+If TIP returns no data for a day → skip that day.
+Weekend days → TIP returns Friday's closing rate, included normally.
+Dates beyond 2-year TIP limit → log warning and skip.
+
+
+Step 5 – Compute Average
+Automatic mode – Incremental running average:
+
+newMonthlyAvg = ((existingAvg × daysProcessed) + newDayRate) / (daysProcessed + 1)
+daysProcessed is derived from the last processed day read from audit JSON.
+If no record exists yet for this month → insert with avg = todayRate.
+If record exists → apply formula and update.
+
+Manual mode – Clean average:
+
+monthlyAvg = sum(dailyRates) / count(validDays)
+All valid days of the month are collected first, then averaged in one pass.
+
+
+Step 6 – Upsert into Target Table
+Insert or update m_lfs.lfs_ref_forex_monthly_avg_rate:
+
+Upsert key: (base_currency, quote_currency, year, month)
+Automatic mode → insert if not exists, update using running average if exists.
+Manual mode → always overwrite with the newly computed clean average.
+Store: monthly_avg_quote_rate, year, month, audit JSON (mode, last updated timestamp, version).
