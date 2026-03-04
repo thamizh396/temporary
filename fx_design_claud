@@ -133,3 +133,135 @@ This works when the job runs without gaps. If missed days are a concern, a `days
 | 3 | Manual trigger invocation interface (Lambda invoke / REST) | Pending |
 
 ---
+============================================================
+
+
+Got it! Here's the clean version:
+
+---
+
+# FX Rate Monthly Average – Design Document
+
+---
+
+## 1. Overview
+
+This solution fetches daily FX rates from the TIP API and computes incremental monthly averages for eligible currency pairs. The computed monthly FX rate will be stored in `m_lfs.lfs_ref_forex_monthly_avg_rate`. The job will not be implemented as a continuously running microservice.
+
+---
+
+## 2. Proposed Solution
+
+A scheduled batch job will be implemented (Lambda or scheduled Spring Boot job based on final approach decision).
+
+The job supports two execution modes:
+
+**Automatic Mode:**
+* Triggered daily after 10 PM ET via scheduler.
+* No user input required.
+* Fetches eligible currency pairs from `m_lfs.lfs_dim_partner`.
+* Calls TIP API once per unique currency pair for that day.
+* Updates the monthly average incrementally using the running average formula.
+
+**Manual Mode:**
+* Triggered by a user or external system with explicit input.
+* Does not read from `dim_partner`. Processes only the provided input.
+* Supports targeted updates, reprocessing, or historical backfill (up to 2 years, limited by TIP API).
+* Overwrites existing records.
+
+---
+
+## 3. Flow of Implementation
+
+> Below flow assumes the scheduler or manual trigger has invoked the main processing class.
+
+---
+
+### Step 1 – Receive or Fetch Input
+
+**Manual Mode – Input from user/system:**
+
+```json
+{
+  "currencyPairs": ["USD/INR", "EUR/USD"],
+  "monthYear": "03/2025"         // specific month
+  // OR
+  "yearRange": { "from": 2024, "to": 2025 }
+}
+```
+
+Validation rules:
+* `currencyPairs` is mandatory. Error thrown if missing.
+* At least one of `monthYear` or `yearRange` is mandatory. Error thrown if both missing.
+* If both provided → `yearRange` takes priority, warning logged.
+* Future months → skipped with warning.
+* Beyond TIP 2-year limit → skipped with warning.
+
+**Automatic Mode – Fetch from `lfs_dim_partner`:**
+
+Query `m_lfs.lfs_dim_partner` and filter:
+* `partner_additional_dtls_json.fx_rate_service_type = 'Automated'`
+
+Extract per partner:
+* `invoice_iso_currency_cd` → Base currency
+* `partner_additional_dtls_json.fx_currency_cd` → Quote currency
+
+---
+
+### Step 2 – Prepare Unique Currency Pairs
+
+From the input (manual) or table data (automatic):
+* Build a deduplicated set of `(base_currency, quote_currency)` pairs.
+* For automatic mode, append current `year` and `month`.
+* For manual mode, expand into all required `(base_currency, quote_currency, year, month)` combinations based on input.
+* This ensures no duplicate TIP API calls are made for the same pair.
+
+---
+
+### Step 3 – Call TIP API
+
+For each unique `(base_currency, quote_currency, year, month)`:
+
+* **Automatic mode** → call TIP for today's date only (one call per pair).
+* **Manual mode** → loop through every day of the month, call TIP per day.
+
+Convert the rate received:
+```
+realRate = outputCurrencyExchangeRate / (10 ^ outputCurrencyDecimalPoint)
+```
+
+Notes:
+* If TIP returns no data for a day → skip that day.
+* Weekend days → TIP returns Friday's closing rate, included normally.
+* Dates beyond 2-year TIP limit → log warning and skip.
+
+---
+
+### Step 4 – Compute Average
+
+**Automatic mode – Incremental running average:**
+```
+newMonthlyAvg = ((existingAvg × daysProcessed) + newDayRate) / (daysProcessed + 1)
+```
+* `daysProcessed` is derived from the current day of month in Java (`today.getDayOfMonth() - 1`).
+* If no record exists yet for this month → insert with `avg = todayRate`.
+* If record exists → apply formula and update.
+
+**Manual mode – Clean average:**
+```
+monthlyAvg = sum(dailyRates) / count(validDays)
+```
+* All valid days of the month are collected first, then averaged in one pass.
+
+---
+
+### Step 5 – Upsert into Target Table
+
+Insert or update `m_lfs.lfs_ref_forex_monthly_avg_rate`:
+
+* Upsert key: `(base_currency, quote_currency, year, month)`
+* **Automatic mode** → insert if not exists, update using running average if exists.
+* **Manual mode** → always overwrite with the newly computed clean average.
+* Store: `monthly_avg_quote_rate`, `year`, `month`, audit JSON (mode, execution time, version).
+
+---
