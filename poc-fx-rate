@@ -57,3 +57,31 @@ Drawbacks:
 • Timeout limitations exist.
 • Debugging can be harder.
 • Additional cloud setup required.
+
+
+Approach 4: Reusable FX Calculator Library (JAR-Based Integration)
+Description:
+
+In this approach, the FX calculation logic is packaged as a reusable JAR library instead of a standalone service. The library contains the full monthly averaging logic and update mechanism for the target table. An existing microservice (which already has access to dim_partner) triggers execution either automatically through a Quartz scheduler or manually through an API. The service collects required inputs (currency pairs, year/month, or updated timestamp for delta runs) and passes them to the library, which performs the TIP calls, computes averages, and updates the database.
+
+Benefits:
+
+Fully reusable across services.
+
+No separate deployment required.
+
+Lightweight and offline execution.
+
+Easy manual and automated triggering.
+
+Centralized FX calculation logic.
+
+Drawbacks:
+
+Tight coupling with host service.
+
+Library version management required.
+
+DB responsibility split across layers.
+
+Requires careful input validation.
