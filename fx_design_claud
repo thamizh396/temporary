@@ -1,0 +1,135 @@
+Got it! Here's the updated design document in clean copy-paste format, same style as yours:
+
+---
+
+# FX Rate Monthly Average – Design Document
+
+---
+
+## 1. Overview
+
+This solution will fetch daily FX rates from the TIP API and compute incremental monthly averages for eligible partners.
+The computed monthly FX rate will be stored in `m_lfs.lfs_ref_forex_monthly_avg_rate`.
+The job supports two execution modes — Daily Automatic and Manual Trigger — and will not be implemented as a continuously running microservice.
+
+---
+
+## 2. Execution Modes
+
+### 2.1 Daily Automatic Mode
+* Triggered after 10 PM ET every day via scheduler.
+* No user input required.
+* Eligible currency pairs fetched from `m_lfs.lfs_dim_partner`.
+* One TIP API call per unique currency pair for that day.
+* Monthly average updated incrementally using running average formula.
+* If TIP returns no data for the day → skip, no count increment.
+* Weekend days → TIP returns Friday's closing rate, included normally.
+
+### 2.2 Manual Trigger Mode
+* Triggered by user or external system with explicit input.
+* Does **not** read from `dim_partner`. Processes only the provided currency pairs.
+* Fetches all days of the specified month(s) from TIP and computes a clean average.
+* **Overwrites** existing records.
+
+**Input Parameters:**
+
+| Parameter | Required? | Description |
+|---|---|---|
+| `currencyPairs` | Mandatory | One or more pairs. E.g. `["USD/INR"]` |
+| `monthYear` | One of these is mandatory | Specific month. E.g. `"03/2025"` |
+| `yearRange` | One of these is mandatory | E.g. `{ from: 2024, to: 2025 }` |
+
+**Validation Rules:**
+* `currencyPairs` missing → throw error, abort.
+* Both `monthYear` and `yearRange` missing → throw error, abort.
+* Both provided → `yearRange` takes priority, log warning.
+* Future months → skip with warning.
+* Beyond TIP 2-year limit → skip with warning.
+
+---
+
+## 3. Incremental Running Average Logic
+
+For daily automatic mode, the monthly average is updated each day as new data arrives.
+
+**Formula:**
+```
+newMonthlyAvg = ((existingAvg × daysProcessed) + newDayRate) / (daysProcessed + 1)
+```
+
+**Day-by-day example (USD/INR, March):**
+
+| Day | TIP Rate | daysProcessed | Stored Avg |
+|---|---|---|---|
+| Mar 1 | 83.10 | 0 | 83.1000 |
+| Mar 2 | 83.25 | 1 | 83.1750 |
+| Mar 3 | 83.40 | 2 | 83.2500 |
+
+**Deriving daysProcessed in Java:**
+```java
+LocalDate today = LocalDate.now(ZoneId.of("America/New_York"));
+int daysProcessed = today.getDayOfMonth() - 1;
+```
+This works when the job runs without gaps. If missed days are a concern, a `days_counted` column in the table is the safer approach — pending data team confirmation.
+
+---
+
+## 4. Flow of Implementation
+
+### Daily Automatic Mode
+1. Scheduler triggers after 10 PM ET.
+2. Query `lfs_dim_partner` → filter `fx_rate_service_type = 'Automated'`.
+3. Extract and deduplicate `(base_currency, quote_currency)` pairs.
+4. For each unique pair:
+   * Call TIP API for today's date.
+   * If no data returned → skip.
+   * Convert rate: `realRate = outputCurrencyExchangeRate / (10 ^ outputCurrencyDecimalPoint)`
+   * Check if record exists in `lfs_ref_forex_monthly_avg_rate` for `(base, quote, year, month)`.
+   * If no record → insert with `avg = todayRate`, `daysProcessed = 1`.
+   * If record exists → apply running average formula, update.
+5. Log execution summary.
+
+### Manual Trigger Mode
+1. Receive input payload.
+2. Validate inputs → throw error and abort if validation fails.
+3. Expand into list of `(currency_pair, year, month)` combinations.
+4. Filter out future months and dates beyond TIP 2-year limit → log warnings.
+5. For each combination:
+   * Loop through every day of the month.
+   * Call TIP API per day. If no data → skip that day.
+   * Compute clean average: `sum(dailyRates) / count(validDays)`.
+   * Upsert into `lfs_ref_forex_monthly_avg_rate`. Overwrite if exists.
+6. Log execution summary.
+
+---
+
+## 5. Key Notes
+
+**dim_partner fields used (Daily mode only):**
+* `invoice_iso_currency_cd` → Base currency
+* `partner_additional_dtls_json.fx_currency_cd` → Quote currency
+* `partner_additional_dtls_json.fx_rate_service_type` → Filter: `'Automated'` only
+
+**TIP API behaviour:**
+* Weekends → returns Friday's closing rate.
+* No data → skip day, no count increment.
+* Historical limit → 2 years. Beyond this, skip with warning.
+* Rates confirmed available by 10 PM ET for current day.
+
+**Target table upsert key:** `(base_currency, quote_currency, year, month)`
+
+**Historical backfill:**
+* Use Manual Trigger Mode with year/month range.
+* TIP supports up to 2 years back. Data older than 2 years to be handled by the data team separately.
+
+---
+
+## 6. Open Items
+
+| # | Item | Status |
+|---|---|---|
+| 1 | `days_counted` column approval from data team | Pending |
+| 2 | Lambda vs Spring Boot confirmation | Pending |
+| 3 | Manual trigger invocation interface (Lambda invoke / REST) | Pending |
+
+---
