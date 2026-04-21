@@ -1,0 +1,12 @@
+@workspace I have added all the required design reference files under the 
+sftp_design_spec package. Please go through all the files in that package 
+and generate a detailed LLD document for the Air Canada SFTP Transaction 
+File Generation feature in this Finance Adaptor service. 
+
+Refer to the existing codebase for the Spring Batch job structure, 
+Quartz scheduling pattern, and partner config setup. 
+
+Output the LLD in Markdown covering — component design, batch job/step structure, 
+class design, sequence diagram (PlantUML), config design, column mapping, 
+S3 file placement via platform SFTP library, error handling, logging, 
+assumptions and out of scope.
